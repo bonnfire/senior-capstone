@@ -1,0 +1,529 @@
+---
+title: "Wine_network1"
+author: "Bonnie Lin"
+date: "11/29/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(network)
+library(mosaic)
+library(sna)
+library(ggplot2)
+library(stringr)
+library(readr)
+library(dplyr)
+library(FactoMineR)
+library(igraph)
+library(cluster)
+library(xtable)
+library(sm)
+```
+
+## Sources for Writeup 
+https://www.sixhat.net/finding-communities-in-networks-with-r-and-igraph.html
+https://www.rdocumentation.org/packages/sm/versions/2.2-5.4/topics/sm.density.compare
+
+## Wine dataset prep for MFA
+```{r}
+set.seed(20000000)
+
+wine_orig <- read_csv("winemag-data-130k-v2.csv")
+#complete_cases_wine <- na.omit(wine)
+#complete_case_wine_count <- nrow(complete_cases_wine)
+
+interestedvars <- wine_orig %>%
+    mutate(year = str_extract(wine_orig$title, "[1|2][0|1|9][0-9][0-9]")) %>%
+  select(price, year, variety, country, points) %>%
+  na.omit()
+
+wine <- interestedvars %>% 
+  mutate(year = as.numeric(year), #convert data type is needed for mfa
+         price = as.numeric(price),
+         variety = as.factor(variety),
+         country = as.factor(country)) %>%
+  filter(country == "France") %>%
+  distinct() %>% 
+  sample_n(100) #too large data structure otherwise 
+
+# 
+# wine_subset <- wine[, c(-1, -3, -4, -11, -12, -14)]
+# wine_reorder <- wine_subset[,c(1,4:6,2,3,9,7,8)] # prep for grouping 
+## res = MFA(wine_reorder, group = c(4, 3, 2), type = c("n", "c", "n"), ncp = 3, name.group = c("place", "measure", "property")) # XX help with the last two groupings 
+## plot(res,choix="ind",partial="all") ## XX help with interpretation 
+
+
+## Annotation for MFA() function
+#wine: the data set used
+#group: a vector indicating the number of variables in each group
+#type: the type of the variables in each group. "s" for scaled continuous variables, "c" for centered (unscaled) continuous variables and "n" for categorical variables
+#ncp: number of dimensions kept in the result
+#name.group: names of the groups
+#num.group.sup: indexes of the supplementary groups
+
+## Also, I tried FAMD() function from the FactoMineR package too but to no avail
+## res2 <- FAMD(wine_reorder)
+## Seems like we can tackle imputing the numerical data but I'm still not sure about imputing text data
+
+
+
+### daisy function to find clusters
+# wine_small <- wine_reorder[, c(1,5:7, 9)] %>%
+#   mutate(country = as.factor(country),
+#          variety = as.factor(variety))
+
+d.wine <- daisy(wine[1:4], metric = "gower", stand = FALSE)
+d.winemat <- as.matrix(d.wine)
+
+## create edge matrix 
+d.winemat.edge <- matrix(rep(0, 100^2), nrow = 100, ncol = 100)
+  
+for(i in 1:100){
+  for(j in 1:100){
+    d.winemat.edge[i,j] = ifelse(d.winemat[i,j] < 0.35, 0, 1)
+  }
+}
+colnames(d.winemat.edge) = wine$
+rownames(d.winemat.edge) = wine$year
+
+
+# make into adjacency list
+wine.diss <- data.frame(wine1=rownames(d.winemat.edge)[row(d.winemat.edge)], wine2=colnames(d.winemat.edge)[col(d.winemat.edge)], dist=c(d.winemat.edge)) 
+
+wine.diss <- wine.diss %>%
+ mutate(edge = ifelse(wine.diss$dist < firstq, 0, 1))
+# 
+# plot(density(wine.diss$dist))
+# firstq <- summary(wine.diss$dist)[2]
+# 
+# adjlist <- by(wine.diss, wine.diss$wine1, function(x) x$wine2)
+# 
+# for (i in as.character(unique(wine.diss$wine1))) {
+#    cat(i, ' -> ', adjlist[[i]], '\n')
+# }
+# 
+# g1 <- graph_from_adj_list(adjlist, mode = "all") 
+# plot(g1)
+# g1 <- simplify(g1)
+# plot(g1)
+```
+
+### Making the index
+Make some index that allows two wine observations to be compared - a dissimiliarity of some sort; maybe via PCA if you know it (or I could help with it)
+
+Questions -- 
+once we have the influential variables from MFA or PCA... how do we quantify this? 
+
+### Construct a wine network 
+Compute the pairwise dissimilarity matrix and use it to construct a wine network - for example, if the dissimiliarity is less than 10, put an edge between the wine nodes.
+
+```{r}
+g1 <- graph_from_adjacency_matrix(d.winemat.edge, mode="upper")
+plot(g1)
+```
+
+### Look for clusters 
+Use a graph partitioning or other clustering on network algorithm to look for clusters, or do some other network analysis to look for hub nodes, or something. https://www.sixhat.net/finding-communities-in-networks-with-r-and-igraph.html 
+The following four algorithms look for clusters: 
+
+## Algorithm 1: Walktrap.community
+
+```{r}
+wt <- walktrap.community(g1)
+membership(wt)
+sizes(wt)
+plot(wt,g1)
+modularity(wt)
+
+```
+
+
+## Algorithm 2: Edge.betweenness.community
+
+```{r}
+# Now we have the merges/splits and we need to calculate the modularity
+# for each merge for this we'll use a function that for each edge
+# removed will create a second graph, check for its membership and use
+# that membership to calculate the modularity
+set.seed(495)
+ebc <- edge.betweenness.community(g1)
+mods <- sapply(0:ecount(g1), function(i){
+  g2 <- delete.edges(g1, ebc$removed.edges[seq(length=i)])
+  cl <- clusters(g2)$membership
+  modularity(g1,cl)
+})
+
+
+# we can now plot all modularities
+plot(mods, pch=100)
+# Now, let's color the nodes according to their membership
+g2<-delete.edges(g1, ebc$removed.edges[seq(length=which.max(mods)-1)])
+V(g1)$color=clusters(g2)$membership
+ 
+# Let's choose a layout for the graph
+g1$layout <- layout.fruchterman.reingold
+ 
+# plot it
+plot(ebc, g1)
+```
+
+
+
+## Algorithm 3: Fastgreedy.community
+
+```{r}
+fc <- cluster_fast_greedy(g1)
+membership(fc)
+sizes(fc)
+coords <- layout_with_fr(g1)
+plot(g1, vertex.color=membership(fc), layout = coords)
+
+#summary stats by cluster
+wine$cluster <- as.factor(fc$membership)
+ wine %>% 
+  group_by(cluster) %>% 
+  summarise(mean_price = mean(price),
+            mean_year = mean(year),
+            mean_points = mean(points))
+
+ #population means 
+mean(wine$price)
+mean(wine$year)
+mean(wine$points)
+```
+
+Gives us two clusters (~25:25)
+
+## Algorithm 4: Spinglass.community
+
+```{r}
+spin <- spinglass.community(g1)
+membership(spin)
+sizes(spin)
+plot(spin, g1)
+```
+
+### Visualizations for the clusters
+A visual to display this that might allow the user to change how the network is constructed (change the dissimilarity) or at least view the clusters would be a good wrap-up visual.
+
+
+```{r, echo=FALSE}
+# promo <- matrix(c(6,0,1,3),ncol=2,byrow=TRUE)
+# colnames(promo) <- c("Promoted","Not Promoted")
+# rownames(promo) <- c("Contributed to Winner","Did Not Contribute to Winner")
+# promo <- as.table(promo)
+
+FC <- as.vector(membership(fc))
+SPIN <- as.vector(membership(spin))
+EBC <- as.vector(membership(ebc))
+
+fc_spin_table <- tally(~FC + SPIN)
+fc_spin_table
+
+tally(~FC+EBC)
+
+everything_table <- tally(~EBC + SPIN + FC)
+everything_table
+```
+
+```{r,results='asis',tab.cap = NULL, echo = FALSE}
+# print(xtable(promo, caption = "TABLE 1 Contribution by Promotion"), 
+#     comment=FALSE, caption.placement = "top")
+```      
+
+
+## Filtering on the most popular wines
+```{r}
+popular5winefind <- interestedvars %>% 
+  group_by(variety) %>% 
+  summarise(n = n()) %>% 
+  as.data.frame() %>% 
+  arrange(., desc(n)) %>% 
+  head(5)
+
+popular5wine <- wine_orig %>%
+    mutate(year = str_extract(wine_orig$title, "[1|2][0|1|9][0-9][0-9]"),
+           price = as.numeric(price),
+           year = as.numeric(price),
+           country = as.factor(country)) %>%
+  select(price, year, variety, country, points) %>%
+  filter(variety %in% popular5winefind$variety) %>%
+  distinct() %>% 
+  na.omit() %>%
+  sample_n(100)
+
+popular5wine <- popular5wine[, c(1, 2, 4, 5, 3)] # prep for grouping 
+
+
+d.wine.pop <- daisy(popular5wine[1:4], metric = "gower", stand = FALSE)
+d.winemat.pop <- as.matrix(d.wine.pop)
+
+## create edge matrix 
+d.winemat.pop.edge <- matrix(rep(0, 100^2), nrow = 100, ncol = 100)
+  
+
+## with this seed, the mean is about 0.3345 
+## the median is about 0.3316
+
+for(i in 1:100){
+  for(j in 1:100){
+    d.winemat.pop.edge[i,j] = ifelse(d.winemat.pop[i,j] < 0.33, 0, 1)
+  }
+}
+colnames(d.winemat.edge) = popular5wine$country
+rownames(d.winemat.edge) = popular5wine$country
+
+# make into adjacency matrix 
+g1.pop <- graph_from_adjacency_matrix(d.winemat.pop.edge, mode="upper")
+plot(g1.pop)
+
+# try algorithms
+wt.pop <- walktrap.community(g1.pop)
+plot(wt.pop, g1.pop)
+
+# # make into adjacency list
+# wine.diss <- data.frame(wine1=rownames(d.winemat.edge)[row(d.winemat.edge)], wine2=colnames(d.winemat.edge)[col(d.winemat.edge)], dist=c(d.winemat.edge)) %>%
+#    mutate(edge = ifelse(wine.diss$dist < firstq, 0, 1))
+```
+
+
+### Analysis on the most popular countries
+```{r}
+set.seed(20000000)
+
+wine_orig <- read_csv("winemag-data-130k-v2.csv")
+#complete_cases_wine <- na.omit(wine)
+#complete_case_wine_count <- nrow(complete_cases_wine)
+
+interestedvars <- wine_orig %>%
+    mutate(year = str_extract(wine_orig$title, "[1|2][0|1|9][0-9][0-9]")) %>%
+  select(price, year, variety, country, points) %>%
+  na.omit()
+
+#get the most recorded countries
+popular5countryfind <- interestedvars %>% 
+  group_by(country) %>% 
+  summarise(n = n()) %>% 
+  as.data.frame() %>% 
+  arrange(., desc(n)) %>% 
+  head(5)
+
+wine_selectcountry <- interestedvars %>% 
+  mutate(year = as.numeric(year), 
+         price = as.numeric(price),
+         variety = as.factor(variety),
+         country = as.factor(country)) %>%
+  filter(country %in% popular5countryfind$country) %>%
+  mutate(country = factor(country),
+         variety = factor(variety)) %>% #when subsetting, factor levels remain  
+  distinct() %>% 
+  sample_n(1500) #too large data structure otherwise 
+
+
+#make plots for EDA (presentation)
+sm.density.compare(wine_selectcountry$points, wine_selectcountry$country, xlab = "Points Received")
+legend("right", levels(wine_selectcountry$country), fill=2+(0:nlevels(wine_selectcountry$country)))
+
+ggplot(wine_selectcountry, aes(y=wine_selectcountry$price)) + 
+  geom_boxplot(aes(fill=wine_selectcountry$country)) + labs(fill='Country', y = "Price")
+
+ggplot(wine_selectcountry, aes(y=wine_selectcountry$year)) + 
+  geom_boxplot(aes(fill=wine_selectcountry$country)) + labs(fill='Country', y = "Year")
+
+## Create dissimilarity matrix
+d.wine <- daisy(wine_selectcountry, metric = "gower", stand = FALSE)
+d.winemat <- as.matrix(d.wine)
+
+## stat of matrix 
+mean(d.winemat)
+median(d.winemat)
+
+## create edge matrix 
+
+#initialize edge matrix with placeholders
+d.winemat.edge <- matrix(rep(0, 1500^2), nrow = 1500, ncol = 1500)
+  
+for(i in 1:1500){
+  for(j in 1:1500){
+    d.winemat.edge[i,j] = ifelse(d.winemat[i,j] < 0.60, 0, 1)
+  }
+}
+# tried parameters 0.3*, 0.35*, 0.59 (2 clusters), 0.61*, 0.65* (* = each observation own cluster)
+mean(d.winemat.edge)
+
+## uncomment if you want countries in plot
+## but I have commmented it here bc I cannot plot 
+## the exceedingly large file
+
+# colnames(d.winemat.edge) = wine$country
+# rownames(d.winemat.edge) = wine$country
+
+
+# make into adjacency list for by-cluster summary stats
+# wine.diss <- data.frame(wine1=rownames(d.winemat.edge)[row(d.winemat.edge)], wine2=colnames(d.winemat.edge)[col(d.winemat.edge)], dist=c(d.winemat.edge)) 
+# 
+# wine.diss <- wine.diss %>%
+#  mutate(edge = ifelse(wine.diss$dist < firstq, 0, 1))
+
+# make graph object of country data
+g_country <- graph_from_adjacency_matrix(d.winemat.edge, mode="upper")
+# don't run this... too big, will crash R: plot(g_country)
+
+# run thru alg 1 walktrap
+wt <- walktrap.community(g_country)
+sizes(wt)
+modularity(wt)
+
+# Summary stats by Cluster
+
+# wine$cluster <- as.factor(fc$membership)
+#  wine %>% 
+#   group_by(cluster) %>% 
+#   summarise(mean_price = mean(price),
+#             mean_year = mean(year),
+#             mean_points = mean(points))
+# 
+# #population means 
+# mean(wine$price)
+# mean(wine$year)
+# mean(wine$points)
+
+
+# alg 2 
+# see below section 
+# ebc <- edge.betweenness.community(g_country)
+# sizes(ebc)
+# not working because beyond the upper limit bound
+
+# alg 3
+fc <- cluster_fast_greedy(g_country)
+sizes(fc)
+modularity(fc)
+
+# alg 4 
+spin <- spinglass.community(g_country)
+sizes(spin)
+
+# alg 5
+ec <- leading.eigenvector.community(g_country)
+sizes(ec)
+modularity(ec)
+
+# alg 6
+lp <- label.propagation.community(g_country)
+sizes(lp)
+
+# Comparing the groups
+
+# Kelly will insert the tables of the sizes here
+WT <- as.vector(membership(wt))
+EBC <- as.vector(membership(ebc))
+FC <- as.vector(membership(fc))
+SPIN <- as.vector(membership(spin))
+EC <- as.vector(membership(ec))
+LP <- as.vector(membership(lp))
+
+
+ec_wt <- tally(~EC + WT); ec_wt
+ec_ebc <- tally(~EC + EBC); ec_ebc
+ec_fc <- tally(~EC + FC); ec_fc
+ec_spin <- tally(~EC + SPIN); ec_spin
+ec_lp <- tally(~EC + LP); ec_lp
+```
+
+
+### All for EBC
+```{r}
+wine_orig <- read_csv("winemag-data-130k-v2.csv")
+#complete_cases_wine <- na.omit(wine)
+#complete_case_wine_count <- nrow(complete_cases_wine)
+
+interestedvars <- wine_orig %>%
+    mutate(year = str_extract(wine_orig$title, "[1|2][0|1|9][0-9][0-9]")) %>%
+  select(price, year, variety, country, points) %>%
+  na.omit()
+
+#get the most recorded countries
+popular5countryfind <- interestedvars %>% 
+  group_by(country) %>% 
+  summarise(n = n()) %>% 
+  as.data.frame() %>% 
+  arrange(., desc(n)) %>% 
+  head(5)
+
+wine_selectcountry_small <- interestedvars %>% 
+  mutate(year = as.numeric(year), 
+         price = as.numeric(price),
+         variety = as.factor(variety),
+         country = as.factor(country)) %>%
+  filter(country %in% popular5countryfind$country) %>%
+  mutate(country = factor(country),
+         variety = factor(variety)) %>% #when subsetting, factor levels remain  
+  distinct() %>% 
+  sample_n(700) #too large data structure otherwise 
+
+
+#make plots for EDA (presentation)
+# sm.density.compare(wine_selectcountry$points, wine_selectcountry$country, xlab = "Points Received")
+# legend("right", levels(wine_selectcountry$country), fill=2+(0:nlevels(wine_selectcountry$country)))
+# 
+# ggplot(wine_selectcountry, aes(y=wine_selectcountry$price)) + 
+#   geom_boxplot(aes(fill=wine_selectcountry$country)) + labs(fill='Country', y = "Price")
+# 
+# ggplot(wine_selectcountry, aes(y=wine_selectcountry$year)) + 
+#   geom_boxplot(aes(fill=wine_selectcountry$country)) + labs(fill='Country', y = "Year")
+# 
+## Create dissimilarity matrix
+d.wine.small <- daisy(wine_selectcountry_small, metric = "gower", stand = FALSE)
+d.winemat.small <- as.matrix(d.wine.small)
+
+## stat of matrix 
+mean(d.winemat.small)
+median(d.winemat.small)
+
+## create edge matrix 
+
+#initialize edge matrix with placeholders
+d.winemat.small.edge <- matrix(rep(0, 700^2), nrow = 700, ncol = 700)
+  
+for(i in 1:700){
+  for(j in 1:700){
+    d.winemat.small.edge[i,j] = ifelse(d.winemat.small[i,j] < 0.70, 0, 1)
+  }
+}
+# tried parameters 0.3*, 0.35*, 0.59 (2 clusters), 0.61*, 0.65* (* = each observation own cluster)
+mean(d.winemat.small.edge)
+
+## uncomment if you want countries in plot
+## but I have commmented it here bc I cannot plot 
+## the exceedingly large file
+
+# colnames(d.winemat.edge) = wine$country
+# rownames(d.winemat.edge) = wine$country
+
+
+# make into adjacency list for by-cluster summary stats
+# wine.diss <- data.frame(wine1=rownames(d.winemat.edge)[row(d.winemat.edge)], wine2=colnames(d.winemat.edge)[col(d.winemat.edge)], dist=c(d.winemat.edge)) 
+# 
+# wine.diss <- wine.diss %>%
+#  mutate(edge = ifelse(wine.diss$dist < firstq, 0, 1))
+
+# make graph object of country data
+g_country.small <- graph_from_adjacency_matrix(d.winemat.small.edge, mode="upper")
+ebc <- edge.betweenness.community(g_country.small)
+sizes(ebc)
+
+
+ec.small <- leading.eigenvector.community(g_country.small)
+sizes(ec.small)
+modularity(ec)
+
+EBC <- as.vector(membership(ebc))
+EC.small <- as.vector(membership(ec.small))
+
+ec_ebc <- tally(~EC.small + EBC); ec_ebc
+```
